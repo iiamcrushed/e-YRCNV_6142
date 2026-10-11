@@ -20,16 +20,16 @@
 '''
 
 # Team ID:          NV_6142
-# Author List:      Suyash Maurya , 
+# Author List:      Suyash Maurya , Pathikrit Roy Choudhury
 # Filename:         task2a.py
-# Functions:        detect_lane, compute_control
-# Global variables: < List any global variables you add, "None" if you add none >
+# Functions:        detect_lane, compute_control, ackermann_wheel_angles
+# Global variables: SRC, DST, M, LANE_WIDTH_PX, HALF_LANE_PX, LANE_WIDTH_M, M_PER_PX, VEHICLE_X, ASPECT, WHEELBASE, TRACK_WIDTH, WHEEL_OFFSET, W_EFF, CRUISE, V_STEADY, K_STANLEY, K_SOFT, STEER_FILTER_ALPHA, MAX_DELTA, _state
 
 
 ####################### IMPORT MODULES #######################
 import sys
 import time
-
+import math
 import cv2
 import numpy as np
 
@@ -54,102 +54,201 @@ STOP_SIGNAL = 'NV_stop'
 ############### ADD YOUR IMPLEMENTATION HERE #################
 ##############################################################
 
+# Lane Detection Calibration Constants
+# Calibrated bird's-eye perspective transform for CoppeliaSim camera
+SRC = np.float32([[211, 200], [394, 200], [512, 410], [40, 410]])
+DST = np.float32([[160, 0], [480, 0], [480, 480], [160, 480]])
+M = cv2.getPerspectiveTransform(SRC, DST)
+
+LANE_WIDTH_PX = 320.0
+HALF_LANE_PX = 160.0
+LANE_WIDTH_M = 0.20                             
+M_PER_PX = LANE_WIDTH_M / LANE_WIDTH_PX 
+VEHICLE_X = 320.0                  
+ASPECT = 1.0                        
+
+# Vehicle steering geometry constants (Task 1A)
+WHEELBASE = 0.120                   
+TRACK_WIDTH = 0.110                
+WHEEL_OFFSET = 0.0275              
+W_EFF = TRACK_WIDTH / 2.0 - WHEEL_OFFSET
+
+# Controller gains and limits (Task 1B tuned for Task 2A)
+CRUISE = 1.3                       
+V_STEADY = 0.0224                  
+K_STANLEY = 1.0                     
+K_SOFT = 0.04                       
+STEER_FILTER_ALPHA = 0.35           
+MAX_DELTA = math.radians(35.0)      
+
+# Persistent state across frames
+_state = {
+    "lane_width_px": 320.0,
+    "last_e": 0.0,
+    "last_psi": 0.0,
+    "last_delta": 0.0,
+    "lost_count": 0
+}
+
+
+def ackermann_wheel_angles(delta):
+    '''
+    Convert virtual front steering angle delta (radians, positive = left)
+    into the two physical front wheel joint angles using Task 1A geometry.
+    '''
+    if abs(delta) < 1e-6:
+        return 0.0, 0.0
+    turn_radius = WHEELBASE / math.tan(delta)
+    left_angle = math.atan(WHEELBASE / (turn_radius - W_EFF))
+    right_angle = math.atan(WHEELBASE / (turn_radius + W_EFF))
+    return left_angle, right_angle
+
+
 def detect_lane(frame):
     '''
     Purpose:
     ---
-    Work out, from a single camera frame, how wrong the vehicle currently is -
-    and hand back whatever `compute_control()` needs in order to correct it.
-
-    This is your Task 1C detector, extended. Task 1C answered *where the lane
-    centre is* and *which lane the vehicle is in*; a controller cannot use
-    either of those directly. It needs to know how far the vehicle is from
-    where it should be, and which way it is pointing.
+    Extract cross-track error (e in metres) and road heading angle (psi in radians)
+    from a single BGR camera frame using calibrated bird's-eye warping and
+    adaptive corridor line tracking. Works seamlessly in both outer and inner lanes.
 
     Input Arguments:
     ---
-    `frame` :   [ numpy.ndarray ]
-        One BGR frame from the vehicle's camera, of shape (height, width, 3),
-        the right way up and in the right colour order.
+    `frame` : [ numpy.ndarray ] of shape (480, 640, 3)
 
     Returns:
     ---
-    Anything you like - a tuple, a dictionary, your own class. Whatever you
-    return here is passed straight to compute_control() and nowhere else, so
-    the two functions only have to agree with each other.
-
-    Example call:
-    ---
-    detection = detect_lane(frame)
-
-    REMEMBER:
-    ---
-    Both lanes are driven during evaluation, and the arena looks mirrored from
-    the other one. Do not hard-code which side the boundary is on.
-
-    Do NOT call cv2.imshow() or cv2.imwrite() from inside this function.
-
-    You are marked on how closely you hold the MIDDLE of your lane, not merely
-    on staying the correct side of the dashed line.
+    `detection` : [ dict ]
+        {
+            'valid' : bool,
+            'e'     : float (metres, positive = vehicle is to the right of centre),
+            'psi'   : float (radians, positive = lane bends to the left ahead)
+        }
     '''
+    global _state
 
-    # ADD YOUR CODE HERE
+    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
+    white = cv2.inRange(hls, (0, 180, 0), (179, 255, 255))
+    yellow = cv2.inRange(hls, (15, 100, 80), (35, 255, 255))
+    mask = cv2.bitwise_or(white, yellow)
 
-    return None
+    # Exclude vehicle hood (bottom) and distant scenery (top)
+    clean_mask = np.zeros_like(mask)
+    clean_mask[160:420, :] = mask[160:420, :]
+    warped = cv2.warpPerspective(clean_mask, M, (640, 480))
+
+    # Base search near bottom of warped view
+    hist_bottom = warped[280:460, :].sum(axis=0)
+    midpoint = 320
+    hist_l = hist_bottom[:midpoint]
+    hist_r = hist_bottom[midpoint:]
+
+    l_valid = hist_l.max() > 800
+    r_valid = hist_r.max() > 800
+
+    lx_base = int(np.argmax(hist_l)) if l_valid else 160
+    rx_base = int(np.argmax(hist_r)) + midpoint if r_valid else 480
+
+    poly_l = None
+    poly_r = None
+
+    if l_valid:
+        ys_l, xs_l = np.nonzero(warped[120:460, max(0, lx_base - 70):min(midpoint + 20, lx_base + 70)])
+        if len(ys_l) > 30:
+            xs_l = xs_l + max(0, lx_base - 70)
+            poly_l = np.polyfit(ys_l, xs_l, 1)
+
+    if r_valid:
+        ys_r, xs_r = np.nonzero(warped[120:460, max(midpoint - 20, rx_base - 70):min(640, rx_base + 70)])
+        if len(ys_r) > 30:
+            xs_r = xs_r + max(midpoint - 20, rx_base - 70)
+            poly_r = np.polyfit(ys_r, xs_r, 1)
+
+    Y_eval = 400.0  
+    if poly_l is not None and poly_r is not None:
+        xl = poly_l[0] * Y_eval + poly_l[1]
+        xr = poly_r[0] * Y_eval + poly_r[1]
+        centre_x = (xl + xr) / 2.0
+        slope = (poly_l[0] + poly_r[0]) / 2.0
+        _state["lane_width_px"] = 0.95 * _state["lane_width_px"] + 0.05 * (xr - xl)
+    elif poly_l is not None:
+        xl = poly_l[0] * Y_eval + poly_l[1]
+        centre_x = xl + _state["lane_width_px"] / 2.0
+        slope = poly_l[0]
+    elif poly_r is not None:
+        xr = poly_r[0] * Y_eval + poly_r[1]
+        centre_x = xr - _state["lane_width_px"] / 2.0
+        slope = poly_r[0]
+    else:
+        return {
+            "valid": False,
+            "e": _state["last_e"],
+            "psi": _state["last_psi"]
+        }
+
+    e = (VEHICLE_X - centre_x) * M_PER_PX
+    psi = math.atan(slope * ASPECT)
+
+    _state["last_e"] = e
+    _state["last_psi"] = psi
+    return {
+        "valid": True,
+        "e": e,
+        "psi": psi
+    }
 
 
 def compute_control(detection, stop_requested):
     '''
     Purpose:
     ---
-    Turn the errors from detect_lane() into the three numbers the vehicle is
-    driven with, and obey the stop flag.
-
-    This is where your Task 1B controller and your Task 1A steering geometry
-    meet: work out one steering angle from the error, then split it into the
-    two front-wheel angles the joints actually take.
+    Translate detect_lane() errors into left and right front-wheel steering
+    angles and motor speed. Uses a smoothed Stanley controller to eliminate
+    steering oscillations, and stops the vehicle when stop_requested is True.
 
     Input Arguments:
     ---
-    `detection` :   [ any ]
-        Whatever detect_lane() returned for this frame.
-
-    `stop_requested` :  [ bool ]
-        True while the evaluation is holding the vehicle at a stop point.
-        This is a LEVEL, not a pulse: it stays True for the whole duration of
-        the stop and goes False when the wait is over. While it is True the
-        vehicle must be STATIONARY, so return a speed of 0.0. There is no
-        stopwatch for you to write and no duration to hard-code.
+    `detection`      : [ dict ] from detect_lane()
+    `stop_requested` : [ bool ] True when evaluation holds vehicle stationary
 
     Returns:
     ---
-    `left_angle`, `right_angle` :   [ float ]
-        The two front-wheel steering angles, in RADIANS, written straight to
-        the steering joints. The scene's steering joints are POSITIVE TO THE
-        LEFT. Nothing is clamped for you - the vehicle's own limit is 45
-        degrees, and commanding past it will not steer any harder.
-
-    `speed` :   [ float ]
-        Target velocity for both drive motors, in rad/s. 0.0 holds the
-        vehicle still.
-
-    Example call:
-    ---
-    left_angle, right_angle, speed = compute_control(detection, stop_requested)
-
-    REMEMBER:
-    ---
-    Keep the loop running while stopped - set the SPEED to zero, not your
-    program. If you stop reading frames you will not see the flag drop.
-
-    Sooner or later a frame comes back with nothing usable in it. Holding the
-    last steering angle, easing off the throttle and stopping dead are all
-    defensible - doing nothing is not.
+    `left_angle`, `right_angle` : [ float ] in radians (positive = left)
+    `speed`                     : [ float ] motor target speed (rad/s)
     '''
+    global _state
 
-    # ADD YOUR CODE HERE
+    if stop_requested:
+        left_angle, right_angle = ackermann_wheel_angles(_state["last_delta"])
+        return left_angle, right_angle, 0.0
 
-    return 0.0, 0.0, 0.0
+    if detection["valid"]:
+        _state["lost_count"] = 0
+        e = detection["e"]
+        psi = detection["psi"]
+
+        # Stanley steering control: delta = psi + atan2(k*e, v + k_soft)
+        delta_raw = psi + math.atan2(K_STANLEY * e, V_STEADY + K_SOFT)
+        delta_raw = max(-MAX_DELTA, min(MAX_DELTA, delta_raw))
+
+        # Low-pass filter to guarantee smooth steering and prevent oscillation
+        delta = STEER_FILTER_ALPHA * delta_raw + (1.0 - STEER_FILTER_ALPHA) * _state["last_delta"]
+        _state["last_delta"] = delta
+    else:
+        _state["lost_count"] += 1
+        delta = _state["last_delta"]
+
+    left_angle, right_angle = ackermann_wheel_angles(delta)
+
+    # Moderate speed slightly if detector is lost or turning hard
+    if _state["lost_count"] > 15:
+        speed = CRUISE * 0.4
+    else:
+        speed = CRUISE
+
+    return left_angle, right_angle, speed
+
+
 
 
 ##############################################################
