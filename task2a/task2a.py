@@ -20,7 +20,11 @@
 '''
 
 # Team ID:          NV_6142
+<<<<<<< HEAD
 # Author List:      Suyash Maurya , Pathikrit Roy Choudhury 
+=======
+# Author List:      Suyash Maurya , Pathikrit Roy Choudhury , Guru Anand Jha 
+>>>>>>> 23d965473525581df64a8e7195d2dbc4f2026d0b
 # Filename:         task2a.py
 # Functions:        detect_lane, compute_control, ackermann_wheel_angles
 # Global variables: SRC, DST, M, LANE_WIDTH_PX, HALF_LANE_PX, LANE_WIDTH_M, M_PER_PX, VEHICLE_X, ASPECT, WHEELBASE, TRACK_WIDTH, WHEEL_OFFSET, W_EFF, CRUISE, V_STEADY, K_STANLEY, K_SOFT, STEER_FILTER_ALPHA, MAX_DELTA, _state
