@@ -4,10 +4,10 @@ Niti Vahan (NV), eYRC 2026-27.
 
 ## Files
 
-| File | What it is |
-|---|---|
-| `task2a.py` | The boilerplate. Fill in `detect_lane()` and `compute_control()`; leave everything else alone. |
-| `Task_2A.ttt` | The CoppeliaSim scene. Open it before you run anything. |
+| File            | What it is                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| `task2a.py`   | The boilerplate. Fill in`detect_lane()` and `compute_control()`; leave everything else alone. |
+| `Task_2A.ttt` | The CoppeliaSim scene. Open it before you run anything.                                           |
 
 ## Requirements
 

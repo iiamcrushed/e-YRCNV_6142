@@ -19,11 +19,11 @@
 *****************************************************************************************
 '''
 
-# Team ID:          < Team-ID >
-# Author List:      < Names of the team members who worked on this file, comma separated >
+# Team ID:          NV_6142
+# Author List:      Suyash Maurya , Pathikrit Roy Choudhury 
 # Filename:         task2c.py
 # Functions:        parking_manoeuvre
-# Global variables: < List any global variables you add, "None" if you add none >
+# Global variables: _last_steering, _last_speed
 
 
 ####################### IMPORT MODULES #######################
@@ -67,6 +67,13 @@ BAY_WIDTH          = 0.22    # m - the vehicle is 0.18 m across
 ##############################################################
 ############### ADD YOUR IMPLEMENTATION HERE #################
 ##############################################################
+
+import math
+
+# Persistent state across frames
+_last_steering = 0.0
+_last_speed = 1.1
+
 
 def parking_manoeuvre(pose):
     '''
@@ -117,25 +124,43 @@ def parking_manoeuvre(pose):
     Example call:
     ---
     steering, speed, parked = parking_manoeuvre(pose)
-
-    REMEMBER:
-    ---
-    Steering straight AT the marker is not parking. The bays are to the
-    right of the road, so pointing at the marker brings the vehicle in on a
-    diagonal, and a car that arrives crooked does not fit a bay with ~20 mm
-    to spare each side. Both 'lateral' and 'heading' have to reach zero.
-
-    The camera is 95 degrees wide. Turn much more than ~40 degrees across the
-    road and the marker slides out of view - `pose` becomes None, and there
-    is nothing left to steer by.
-
-    A single None frame is normal. Decide what to do on one; doing nothing
-    sensible is how a vehicle drives off.
     '''
+    global _last_steering, _last_speed
 
-    # ADD YOUR CODE HERE
+    # If the marker was missed in this frame, coast smoothly with previous controls
+    if pose is None:
+        return _last_steering, _last_speed, False
 
-    return 0.0, 0.0, False
+    lateral = pose['lateral']
+    forward = pose['forward']
+    heading = pose['heading']
+
+    # Stop condition: vehicle has reached the middle of the parking bay
+    if forward <= BAY_MIDDLE_FORWARD:
+        _last_steering = 0.0
+        _last_speed = 0.0
+        return 0.0, 0.0, True
+
+    # Geometry: 
+    ALIGN_FORWARD = 0.42
+
+    if forward >= ALIGN_FORWARD:
+        dist_x = max(forward - ALIGN_FORWARD, 0.04)
+        theta_target = -math.atan2(lateral, dist_x)
+        psi_des = float(np.clip(1.3 * theta_target, -np.deg2rad(38.0), np.deg2rad(38.0)))
+
+        # Heading tracking control
+        steer = 2.4 * (psi_des - heading)
+        speed = 1.1
+    else:
+        steer = -2.2 * heading - math.atan2(2.5 * lateral, 0.15)
+        speed = 0.6
+
+    steer = float(np.clip(steer, -np.deg2rad(45.0), np.deg2rad(45.0)))
+    _last_steering = 0.7 * steer + 0.3 * _last_steering
+    _last_speed = speed
+
+    return _last_steering, _last_speed, False
 
 
 ##############################################################
